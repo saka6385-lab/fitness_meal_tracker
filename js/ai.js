@@ -21,7 +21,7 @@ export const PROVIDERS = {
     keyUrl: 'https://aistudio.google.com/apikey',
     note: '無料枠があります(1分あたりのリクエスト数などに制限あり)。Googleアカウントで発行できます。',
     models: [
-      { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (推奨)' },
+      { value: 'gemini-flash-latest', label: 'Gemini Flash (最新・推奨)' },
       { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
     ],
   },
