@@ -1,16 +1,18 @@
 import * as db from './db.js';
 import { computeTargets, ACTIVITY_LABELS, GOAL_LABELS } from './calc.js';
-import { resizeImage, analyzeFoodPhoto, MODEL_OPTIONS } from './ai.js';
+import { resizeImage, analyzeFoodPhoto, PROVIDERS } from './ai.js';
 
 const app = document.getElementById('app');
 
 const DEFAULT_TARGETS = { calories: 2400, protein: 150, fat: 70, carbs: 280 };
+const DEFAULT_PROVIDER = 'anthropic';
 
 let cache = {
   profile: null,
   targets: null,
-  apiKey: '',
-  model: MODEL_OPTIONS[1].value,
+  provider: DEFAULT_PROVIDER,
+  apiKeys: { anthropic: '', gemini: '' },
+  models: { anthropic: PROVIDERS.anthropic.models[1].value, gemini: PROVIDERS.gemini.models[0].value },
   onboarded: false,
 };
 
@@ -18,9 +20,24 @@ async function loadCache() {
   const s = await db.getAllSettings();
   cache.profile = s.profile ?? null;
   cache.targets = s.targets ?? DEFAULT_TARGETS;
-  cache.apiKey = s.apiKey ?? '';
-  cache.model = s.model ?? MODEL_OPTIONS[1].value;
+  cache.provider = s.provider ?? DEFAULT_PROVIDER;
+  cache.apiKeys = {
+    anthropic: s.apiKeyAnthropic ?? '',
+    gemini: s.apiKeyGemini ?? '',
+  };
+  cache.models = {
+    anthropic: s.modelAnthropic ?? PROVIDERS.anthropic.models[1].value,
+    gemini: s.modelGemini ?? PROVIDERS.gemini.models[0].value,
+  };
   cache.onboarded = !!s.onboarded;
+}
+
+function currentApiKey() {
+  return cache.apiKeys[cache.provider];
+}
+
+function currentModel() {
+  return cache.models[cache.provider];
 }
 
 // ---------- helpers ----------
@@ -331,10 +348,11 @@ function renderLog() {
 
 function renderLogScreen() {
   const screen = document.getElementById('log-screen');
-  if (!cache.apiKey) {
+  if (!currentApiKey()) {
     screen.innerHTML = `
-      <div class="banner info">AI解析を使うには設定画面でAnthropic APIキーを登録してください。登録なしでも手動入力で記録できます。</div>
-      ${photoPickerHtml()}
+      <div class="banner info">AI解析を使うには設定画面でAPIキーを登録してください。登録なしでも手動入力で記録できます。</div>
+      ${logState.dataUrl ? `<img class="photo-preview" src="${logState.dataUrl}" alt="">` : photoPickerHtml()}
+      ${logState.dataUrl ? `<button class="btn secondary" id="retake-btn" style="margin-bottom:14px;">写真を撮り直す</button>` : ''}
       ${manualFormHtml(null)}
       <button class="btn" id="save-btn">保存する</button>
     `;
@@ -443,8 +461,9 @@ async function runAnalysis() {
   renderLogScreen();
   try {
     const result = await analyzeFoodPhoto({
-      apiKey: cache.apiKey,
-      model: cache.model,
+      provider: cache.provider,
+      apiKey: currentApiKey(),
+      model: currentModel(),
       base64: logState.base64,
       mediaType: logState.mediaType,
     });
@@ -563,6 +582,53 @@ async function renderHistoryDay(dateKey) {
 
 // ---------- settings ----------
 
+function providerCardHtml(provider) {
+  const meta = PROVIDERS[provider];
+  const key = cache.apiKeys[provider] ?? '';
+  const model = cache.models[provider] ?? meta.models[0].value;
+  return `
+    <div class="segmented" id="s-provider" style="margin-bottom:14px;">
+      ${Object.entries(PROVIDERS)
+        .map(
+          ([value, m]) =>
+            `<button type="button" data-value="${value}" class="${value === provider ? 'selected' : ''}">${m.label}</button>`
+        )
+        .join('')}
+    </div>
+    <div class="field">
+      <label>APIキー</label>
+      <input type="password" id="s-apikey" value="${escapeHtml(key)}" placeholder="${meta.keyPlaceholder}">
+    </div>
+    <div class="field">
+      <label>使用モデル</label>
+      <select id="s-model">
+        ${meta.models.map((o) => `<option value="${o.value}" ${o.value === model ? 'selected' : ''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="hint">
+      APIキーはこの端末のブラウザ内にのみ保存され、写真解析時に直接プロバイダへ送信されます(サーバーは経由しません)。
+      <a href="${meta.keyUrl}" target="_blank" rel="noopener" style="color:var(--accent);">キーを発行する</a><br>
+      ${meta.note}
+    </div>
+  `;
+}
+
+function bindProviderCardEvents() {
+  const group = document.getElementById('s-provider');
+  group.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      // Persist whatever the user typed for the provider they're leaving so it's not lost.
+      const leavingProvider = group.querySelector('button.selected').dataset.value;
+      cache.apiKeys[leavingProvider] = document.getElementById('s-apikey').value.trim();
+      cache.models[leavingProvider] = document.getElementById('s-model').value;
+
+      const newProvider = b.dataset.value;
+      document.getElementById('provider-card-body').innerHTML = providerCardHtml(newProvider);
+      bindProviderCardEvents();
+    });
+  });
+}
+
 function renderSettings() {
   const p = cache.profile ?? {};
   const t = cache.targets;
@@ -574,24 +640,11 @@ function renderSettings() {
       <div class="subtitle">プロフィール・目標・APIキー</div>
     </div>
     <div class="screen">
-      ${isWelcome ? `<div class="banner info">セットアップ完了！AI解析を使うにはAnthropicのAPIキーを登録してください。</div>` : ''}
+      ${isWelcome ? `<div class="banner info">セットアップ完了！AI解析を使うにはAPIキーを登録してください(AnthropicまたはGoogle Geminiが選べます)。</div>` : ''}
 
       <div class="card">
-        <div class="card-title">Anthropic APIキー</div>
-        <div class="field">
-          <label>APIキー (写真のAI解析に使用)</label>
-          <input type="password" id="s-apikey" value="${escapeHtml(cache.apiKey)}" placeholder="sk-ant-...">
-        </div>
-        <div class="field">
-          <label>使用モデル</label>
-          <select id="s-model">
-            ${MODEL_OPTIONS.map((o) => `<option value="${o.value}" ${o.value === cache.model ? 'selected' : ''}>${o.label}</option>`).join('')}
-          </select>
-        </div>
-        <div class="hint">
-          APIキーはこの端末のブラウザ内にのみ保存され、写真解析時に直接 api.anthropic.com へ送信されます（サーバーは経由しません）。
-          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style="color:var(--accent);">console.anthropic.com</a> で発行できます。解析ごとに少額の従量課金が発生します。
-        </div>
+        <div class="card-title">AIプロバイダ・APIキー</div>
+        <div id="provider-card-body">${providerCardHtml(cache.provider)}</div>
       </div>
 
       <div class="card">
@@ -630,6 +683,7 @@ function renderSettings() {
   selectGroup('f-sex');
   selectGroup('f-activity');
   selectGroup('f-goal');
+  bindProviderCardEvents();
 
   document.getElementById('recalc-btn').addEventListener('click', () => {
     const profile = readProfileForm();
@@ -650,13 +704,17 @@ function renderSettings() {
       fat: Number(document.getElementById('t-fat').value) || DEFAULT_TARGETS.fat,
       carbs: Number(document.getElementById('t-carbs').value) || DEFAULT_TARGETS.carbs,
     };
-    const apiKey = document.getElementById('s-apikey').value.trim();
-    const model = document.getElementById('s-model').value;
+    const provider = document.querySelector('#s-provider button.selected').dataset.value;
+    cache.apiKeys[provider] = document.getElementById('s-apikey').value.trim();
+    cache.models[provider] = document.getElementById('s-model').value;
 
     await db.setSetting('profile', profile);
     await db.setSetting('targets', targets);
-    await db.setSetting('apiKey', apiKey);
-    await db.setSetting('model', model);
+    await db.setSetting('provider', provider);
+    await db.setSetting('apiKeyAnthropic', cache.apiKeys.anthropic);
+    await db.setSetting('apiKeyGemini', cache.apiKeys.gemini);
+    await db.setSetting('modelAnthropic', cache.models.anthropic);
+    await db.setSetting('modelGemini', cache.models.gemini);
     await db.setSetting('onboarded', true);
     await loadCache();
     history.replaceState(null, '', '#/dashboard');

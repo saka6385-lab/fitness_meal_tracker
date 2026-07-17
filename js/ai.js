@@ -1,15 +1,31 @@
-// Claude Vision integration — runs directly from the browser using the
-// user's own Anthropic API key (stored locally, never sent anywhere but
-// api.anthropic.com).
+// Vision-based nutrition analysis — runs directly from the browser using the
+// user's own API key (stored locally, sent only to the chosen provider).
 
-const API_URL = 'https://api.anthropic.com/v1/messages';
 const MAX_DIMENSION = 1024;
 
-export const MODEL_OPTIONS = [
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku (速い・安い)' },
-  { value: 'claude-sonnet-5', label: 'Sonnet (バランス・推奨)' },
-  { value: 'claude-opus-4-8', label: 'Opus (高精度・高コスト)' },
-];
+export const PROVIDERS = {
+  anthropic: {
+    label: 'Anthropic (Claude)',
+    keyPlaceholder: 'sk-ant-...',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
+    note: '従量課金制です。解析1回あたり数円程度のコストが発生します。',
+    models: [
+      { value: 'claude-haiku-4-5-20251001', label: 'Haiku (速い・安い)' },
+      { value: 'claude-sonnet-5', label: 'Sonnet (バランス・推奨)' },
+      { value: 'claude-opus-4-8', label: 'Opus (高精度・高コスト)' },
+    ],
+  },
+  gemini: {
+    label: 'Google Gemini (無料枠あり)',
+    keyPlaceholder: 'AIza...',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    note: '無料枠があります(1分あたりのリクエスト数などに制限あり)。Googleアカウントで発行できます。',
+    models: [
+      { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (推奨)' },
+      { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+    ],
+  },
+};
 
 const PROMPT = `あなたは栄養士です。添付された食事の写真を見て、含まれる料理・食品を特定し、量を目視で推定した上で、栄養価を見積もってください。
 複数の料理が写っている場合は合計値を計算してください。
@@ -73,10 +89,20 @@ function extractJson(text) {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-export async function analyzeFoodPhoto({ apiKey, model, base64, mediaType }) {
-  if (!apiKey) throw new Error('APIキーが設定されていません。設定画面で入力してください。');
+function normalizeResult(parsed) {
+  return {
+    foodName: String(parsed.foodName ?? '不明な食事'),
+    description: String(parsed.description ?? ''),
+    calories: Number(parsed.calories) || 0,
+    protein: Number(parsed.protein_g) || 0,
+    fat: Number(parsed.fat_g) || 0,
+    carbs: Number(parsed.carbs_g) || 0,
+    confidence: parsed.confidence ?? 'medium',
+  };
+}
 
-  const res = await fetch(API_URL, {
+async function analyzeWithAnthropic({ apiKey, model, base64, mediaType }) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -113,15 +139,45 @@ export async function analyzeFoodPhoto({ apiKey, model, base64, mediaType }) {
 
   const data = await res.json();
   const text = data?.content?.find((c) => c.type === 'text')?.text ?? '';
-  const parsed = extractJson(text);
+  return normalizeResult(extractJson(text));
+}
 
-  return {
-    foodName: String(parsed.foodName ?? '不明な食事'),
-    description: String(parsed.description ?? ''),
-    calories: Number(parsed.calories) || 0,
-    protein: Number(parsed.protein_g) || 0,
-    fat: Number(parsed.fat_g) || 0,
-    carbs: Number(parsed.carbs_g) || 0,
-    confidence: parsed.confidence ?? 'medium',
-  };
+async function analyzeWithGemini({ apiKey, model, base64, mediaType }) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [{ text: PROMPT }, { inline_data: { mime_type: mediaType, data: base64 } }],
+        },
+      ],
+      generationConfig: { response_mime_type: 'application/json' },
+    }),
+  });
+
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = body?.error?.message || JSON.stringify(body);
+    } catch {
+      detail = await res.text();
+    }
+    if (res.status === 400 || res.status === 403) throw new Error('APIキーが無効です。設定画面を確認してください。');
+    if (res.status === 429) throw new Error('無料枠のリクエスト制限に達しました。しばらく待ってから再試行してください。');
+    throw new Error(`AI解析に失敗しました (${res.status}): ${detail}`);
+  }
+
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts ?? [];
+  const text = parts.find((p) => p.text)?.text ?? '';
+  return normalizeResult(extractJson(text));
+}
+
+export async function analyzeFoodPhoto({ provider, apiKey, model, base64, mediaType }) {
+  if (!apiKey) throw new Error('APIキーが設定されていません。設定画面で入力してください。');
+  if (provider === 'gemini') return analyzeWithGemini({ apiKey, model, base64, mediaType });
+  return analyzeWithAnthropic({ apiKey, model, base64, mediaType });
 }
